@@ -3,7 +3,7 @@ import React from 'react'
 const Film = ({ data }) => {
   return (
     <main>
-      <h1>The {process.env.FAVORITE_MOVIE} films</h1>
+      <h1>The {process.env.FAVORITE_MOVIE} films meow</h1>
       <ul>
         {data.map(item => (
           <li key={item.title}>{item.title}</li>
