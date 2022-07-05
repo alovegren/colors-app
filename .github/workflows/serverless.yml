@@ -19,7 +19,7 @@ jobs:
       with:
         node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
-     - name: create .env
+    - name: create .env
       run: |
         touch .env
         echo FAVORITE_MOVIE=${{ secrets.FAVORITE_MOVIE }} >> .env
