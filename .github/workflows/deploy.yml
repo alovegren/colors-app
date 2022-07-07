@@ -16,6 +16,7 @@ jobs:
         number: ${{ github.event.number }}
         id: deploy-preview
         message: 'Starting deployment of this pull request.'
+        reactions: rocket
     - name: Checkout
       uses: actions/checkout@v3
       with:
@@ -33,10 +34,18 @@ jobs:
       uses: oNaiPs/secrets-to-env-action@v1
       with:
         secrets: ${{ toJSON(secrets) }}
+    - name: create serverless yaml file
+      run: |
+        touch serverless.yml
+    - name: add config to serverless yaml file
+      id: config
+      uses: mikefarah/yq@master
+      with:
+        cmd: yq -i e '.myNextApplication.component = "@sls-next/serverless-component@latest"' serverless.yml 
     - name: deploy with serverless framework
       run: |
         npm install
-        npm install serverless@2.72.2
+        npm install @sls-next/serverless-component
         npx serverless@2.72.2
     - name: display the cloudfront link
       id: url
@@ -54,3 +63,4 @@ jobs:
         message: |
           Deployment of a preview for this pull request was successful. The link is at ${{ steps.url.outputs.prop }}
         recreate: true
+        reactions: hooray
