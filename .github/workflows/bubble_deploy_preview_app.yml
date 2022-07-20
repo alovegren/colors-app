@@ -1,0 +1,160 @@
+name: Bubble--Make Preview App
+on: pull_request
+
+env:
+  NODE_VERSION: 16.15.1
+  AWS_ACCESS_KEY_ID: ${{ secrets.BUBBLE_AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.BUBBLE_AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  PR_NAME: ${{ github.event.pull_request.title }}
+  PR_NUMBER: ${{ github.event.number }}
+  REPO_NAME: ${{ github.event.repository.name }}
+  COMMIT_ID: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  notify_start:
+    name: Add Pending Bubble Message
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify about starting this deployment
+        uses: hasura/comment-progress@v2.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          commit-sha: ${{ env.COMMIT_ID }}
+          id: deploy-preview
+          message: "Hang tight! We'll get started provisioning AWS resources for your brand new bubble. Grab a coffee while you wait \U00002615"
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    name: Build and deploy bubble
+    steps:
+      - name: Get triggering branch
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Export Environment Variables
+        run: |
+          export AWS_ACCESS_KEY_ID=${{ env.AWS_ACCESS_KEY_ID }}
+          export AWS_SECRET_ACCESS_KEY=${{ env.AWS_SECRET_ACCESS_KEY }}
+
+      - name:
+        uses: oNaiPs/secrets-to-env-action@v1
+        with:
+          secrets: ${{ toJSON(secrets) }}
+
+      - name: Create Serverless YML file
+        run: |
+          touch serverless.yml
+
+      - name: Add Config to Serverless YML file
+        id: config
+        uses: mikefarah/yq@master
+        with:
+          cmd: yq -i e '.myNextApplication.component = "@sls-next/serverless-component@latest"' serverless.yml
+
+      - name: Deploy using Serverless Framework
+        run: |
+          npm install
+          npm install @sls-next/serverless-component
+          npx serverless@2.72.2
+
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Display Cloudfront link for new bubble
+        id: url
+        uses: notiz-dev/github-action-json-property@release
+        with:
+          path: "./.serverless/Template.myNextApplication.CloudFront.json"
+          prop_path: "url"
+
+      - name: Output S3 Bucket for static files
+        id: bucket
+        uses: notiz-dev/github-action-json-property@release
+        with:
+          path: "./.serverless/Template.myNextApplication.AwsS3.json"
+          prop_path: "name"
+
+      - name: Output the CloudFront Distribution Id
+        id: distributionid
+        uses: notiz-dev/github-action-json-property@release
+        with:
+          path: "./.serverless/Template.myNextApplication.CloudFront.json"
+          prop_path: "id"
+
+      - name: Output Bubble Subdomain
+        uses: satackey/action-js-inline@v0.0.2
+        id: getsubdomain
+        with:
+          script: |
+            const core = require('@actions/core')
+            const subdomain = "${{ steps.url.outputs.prop }}".split('.')[0].split('/')[2]
+            core.setOutput('subdomain', subdomain)
+
+      - name: Output Timestamp
+        uses: satackey/action-js-inline@v0.0.2
+        id: gettimestamp
+        with:
+          script: |
+            const core = require('@actions/core')
+            const dateTimeNow = new Date()
+            const timestamp = dateTimeNow.toISOString()
+            core.setOutput('timestamp', timestamp)
+
+      - name: Get Commit Message
+        run: echo "COMMIT_MESSAGE=$(git log --format=%B -n 1 ${{ github.event.after }})" >> $GITHUB_ENV
+
+      - name: Get Bubble data from DynamoDB
+        uses: mathiasvr/command-output@v1
+        id: previewappdata
+        with:
+          run: |
+            aws dynamodb get-item --table-name ${{ env.REPO_NAME }}-PreviewApps --key '{ "PullRequestId": {"N": "${{ env.PR_NUMBER }}"}}'
+
+      - name: Output Commit ID for Existing PR
+        uses: satackey/action-js-inline@v0.0.2
+        if: ${{ steps.previewappdata.outputs.stdout }}
+        id: getindex
+        with:
+          script: |
+            const core = require('@actions/core')
+            let commitsArray = ${{steps.previewappdata.outputs.stdout}}
+            let index = commitsArray.Item.Commits.L.length
+            core.setOutput('index', index)
+
+      - name: Create Entry for PR in DynamoDB
+        if: ${{ !steps.previewappdata.outputs.stdout }}
+        run: |
+          aws dynamodb put-item --table-name ${{ env.REPO_NAME }}-PreviewApps --item '{ "PullRequestId": {"N": "${{ env.PR_NUMBER }}" }}'
+          aws dynamodb update-item --table-name ${{ env.REPO_NAME }}-PreviewApps --key '{ "PullRequestId": {"N": "${{ env.PR_NUMBER }}"}}' --update-expression "SET PRName = :newval" --expression-attribute-values '{":newval":{"S":"${{ env.PR_NAME }}"}}' --return-values ALL_NEW
+          aws dynamodb update-item --table-name ${{ env.REPO_NAME }}-PreviewApps --key '{ "PullRequestId": {"N": "${{ env.PR_NUMBER }}"}}' --update-expression "SET IsActive = :newval" --expression-attribute-values '{":newval":{"BOOL":true}}' --return-values ALL_NEW
+          aws dynamodb update-item --table-name ${{ env.REPO_NAME }}-PreviewApps --key '{ "PullRequestId": {"N": "${{ env.PR_NUMBER }}"}}' --update-expression "SET Commits = :newval" --expression-attribute-values '{":newval":{"L":[]}}' --return-values ALL_NEW
+          aws dynamodb update-item --table-name ${{ env.REPO_NAME }}-PreviewApps --key '{ "PullRequestId": {"N": "${{ env.PR_NUMBER }}"}}' --update-expression "SET Commits[0] = :newval" --expression-attribute-values '{":newval":{"M":{"CommitId": {"S": "${{ env.COMMIT_ID }}"}, "CloudFrontDistroId": {"S": "${{ steps.distributionId.outputs.prop }}"}, "BucketId": {"S": "${{ steps.bucket.outputs.prop }}"}, "CommitMessageHeader": {"S": "${{ env.COMMIT_MESSAGE }}"}, "CloudfrontSubdomain": {"S": "${{ steps.getsubdomain.outputs.subdomain }}"}, "CreatedAt": {"S": "${{ steps.gettimestamp.outputs.timestamp }}"}}}}' --return-values ALL_NEW
+
+      - name: Add New Bubble Preview App Data to DB
+        if: ${{ steps.previewappdata.outputs.stdout }}
+        run: |
+          aws dynamodb update-item --table-name ${{ env.REPO_NAME }}-PreviewApps --key '{ "PullRequestId": {"N": "${{ env.PR_NUMBER }}"}}' --update-expression "SET Commits[${{steps.getindex.outputs.index}}] = :newval" --expression-attribute-values '{":newval":{"M":{"CommitId": {"S": "${{ env.COMMIT_ID }}"}, "CloudFrontDistroId": {"S": "${{ steps.distributionId.outputs.prop }}"}, "BucketId": {"S": "${{ steps.bucket.outputs.prop }}"}, "CommitMessageHeader": {"S": "${{ env.COMMIT_MESSAGE }}"}, "CloudfrontSubdomain": {"S": "${{ steps.getsubdomain.outputs.subdomain }}"}, "CreatedAt": {"S": "${{ steps.gettimestamp.outputs.timestamp }}"}}}}' --return-values ALL_NEW
+
+      - name: Notify Bubble Success and URL
+        uses: hasura/comment-progress@v2.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          commit-sha: ${{ env.COMMIT_ID }}
+          id: deploy-preview
+          message: "Yay! \U0001F389 Your bubble was successfully deployed and is ready to be viewed in all its glory. Check out the link at ${{ steps.url.outputs.prop }}."
+          recreate: true
